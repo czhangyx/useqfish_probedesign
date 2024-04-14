@@ -68,7 +68,7 @@ def designHCR3Probes(gene_id="", gene_name="", hairpin_id=None, email=None,
                  result_path=os.path.join(result_path, f"{gene_name}_prbs_candidates_alignment_results.sam"))
 
     ## parse sam file to get mapq
-    print(" 0. aligning probe sequences on refseq database using bowtie2")
+    print(" 1. filtering GC contents, Tm, repeats, dG ...")
 
     ## basic filtering
     bad_gc, bad_repeats, bad_dg = basicFilter(prbs, num_prbs, prb_length=prb_length, gc_range=gc_range, dg_thresh=dg_thresh)
@@ -88,7 +88,6 @@ def designHCR3Probes(gene_id="", gene_name="", hairpin_id=None, email=None,
 
     ## Find basic bad probes
     bad_inds = bad_gc + bad_repeats + bad_dg
-    # bad_inds = bad_gc + bad_repeats + bad_dg + bad_unique
 
     # Select probe sequences that are apart
     prb_pos = np.argwhere(np.logical_not(bad_inds))
@@ -98,8 +97,12 @@ def designHCR3Probes(gene_id="", gene_name="", hairpin_id=None, email=None,
     # print(len(prb_pos))
 
     # Check NCBI databank for description matching
-    bad_unique = HCR3IsUnique(os.path.join(result_path, f"{gene_name}_prbs_candidates_alignment_results.sam"), gene_name, prb_pos)
-    prb_pos = prb_pos[~bad_unique]
+    print(' 2. aligning probe sequences on refseq database using bowtie2')
+    bad_unique = IsUnique(os.path.join(result_path, f"{gene_name}_prbs_candidates_alignment_results.sam"), gene_name, prb_pos)
+    bad_unique_each = IsUnique(os.path.join(result_path, f"{gene_name}_prbs_candidates_full_alignment_results.sam"),
+                               gene_name, prb_pos, full=True)
+    prb_pos = prb_pos[~(bad_unique | bad_unique_each)]
+
 
     # only select sequences within the coding region
     # and sequences that are apart from the adjacent one
@@ -198,11 +201,6 @@ def designUSeqFISHProbes(gene_id="", gene_name="", email=None,
     ProbeBowtie2(os.path.join(result_path, f"{gene_name}_prbs_candidates.fasta"), db=db,
                  result_path=os.path.join(result_path, f"{gene_name}_prbs_candidates_alignment_result.sam"), score_min="G,10,4")
 
-    # parse sam file to get mapq and
-    # find only unique probe sequences
-    print(" 0. aligning probe sequences on refseq database using bowtie2")
-    bad_unique = IsUnique(os.path.join(result_path, f"{gene_name}_prbs_candidates_alignment_result.sam"), gene_name, num_prbs)
-
     # basic filtering
     print(" 1. filtering GC contents, Tm, repeats, dG ...") 
     bad_gc, bad_repeats, bad_dg = basicFilter(prbs, num_prbs, prb_length=prb_length, gc_range=gc_range, dg_thresh=dg_thresh)
@@ -224,11 +222,7 @@ def designUSeqFISHProbes(gene_id="", gene_name="", email=None,
                  result_path=os.path.join(result_path, f"{gene_name}_primers_candidates_alignment_results.sam"), score_min='G,20,8')
     ProbeBowtie2(os.path.join(result_path, f"{gene_name}_padlocks.fasta"), db=db,
                  result_path=os.path.join(result_path, f"{gene_name}_padlocks_candidates_alignment_results.sam"), score_min='G,20,8')
-    bad_unique_primers = IsUnique(os.path.join(result_path, f"{gene_name}_primers_candidates_alignment_results.sam"), gene_name, num_prbs)
-    bad_unique_padlocks = IsUnique(os.path.join(result_path, f"{gene_name}_padlocks_candidates_alignment_results.sam"), gene_name, num_prbs)
-    bad_unique_full = bad_unique_primers | bad_unique_padlocks
-
-
+    
     ## nupack secondary structure analysis
     print(" 2. secondary structure modeling ...")
     bad_secondary = []
@@ -240,11 +234,19 @@ def designUSeqFISHProbes(gene_id="", gene_name="", email=None,
         bond_count.append((bond_count_primer, bond_count_padlock))
 
     # Find bad probes
-    bad_inds = bad_gc + bad_repeats + bad_dg + bad_unique + bad_unique_full + bad_secondary
+    bad_inds = bad_gc + bad_repeats + bad_dg + bad_secondary
 
     # Select probe sequences that are apart
     prb_pos = np.argwhere(np.logical_not(bad_inds))
-    prb_pos = np.array(prb_pos.ravel())   
+    prb_pos = np.array(prb_pos.ravel())
+
+    # Check NCBI databank for description matching
+    print(' 3. aligning probe sequences on refseq database using bowtie2')
+    bad_unique = IsUnique(os.path.join(result_path, f"{gene_name}_prbs_candidates_alignment_result.sam"), gene_name, prb_pos)
+    bad_unique_primers = IsUnique(os.path.join(result_path, f"{gene_name}_primers_candidates_alignment_results.sam"), gene_name, prb_pos)
+    bad_unique_padlocks = IsUnique(os.path.join(result_path, f"{gene_name}_padlocks_candidates_alignment_results.sam"), gene_name, prb_pos)
+    bad_unique_full = bad_unique_primers | bad_unique_padlocks
+    prb_pos = prb_pos[~(bad_unique | bad_unique_full)]
 
     # only select sequences within the coding region
     # and sequences that are apart from the adjacent one
@@ -303,16 +305,22 @@ def GetInitiatorSeq(hairpin_id=2, I_id=2):
                     ['CTCACTCCCAATCTCTATCTACCCTACAAATCCAAT', 'CACTTCATATCACTCACTCCCAATCTCTATCTACCC']]
     return init_seqs[hairpin_id-1][I_id-1]
 
-def HCR3IsUnique(samfile_path, gene_name, prb_pos):
+
+def IsUnique(samfile_path, gene_name, prb_pos, full=False):
     # find hits (ids) from alignment 
     num_prbs = len(prb_pos)
     hits = [[] for _ in range(num_prbs)]
+    if full:
+        hits = [[] for _ in range(num_prbs*2)]
     # print(hits)
     with open(samfile_path, "rb") as samfile:
         i = 0
         for line in samfile:
             info = line.decode().split('\t')
-            index = int(info[0])-1
+            if '-' in info[0]:
+                index = int(info[0][:-2])
+            else:
+                index = int(info[0])-1
             if index not in prb_pos:
                 continue
             hits[i].append(info[2])
@@ -327,31 +335,6 @@ def HCR3IsUnique(samfile_path, gene_name, prb_pos):
                 handle = Entrez.efetch(db="nucleotide", id=hit_id, rettype="gb", retmode="text")
                 search_result = SeqIO.read(handle, "genbank")
                 if gene_name.lower() in search_result.description.lower():
-                    variants.append(hit_id)
-                else:
-                    bad_unique[i] = 1
-
-    return bad_unique
-
-
-def IsUnique(samfile_path, gene_name, num_prbs=0):
-    # find hits (ids) from alignment 
-    hits = [[] for _ in range(num_prbs)]
-    # print(hits)
-    with open(samfile_path, "rb") as samfile:
-        for line in samfile:
-            info = line.decode().split('\t')
-            hits[int(info[0])-1].append(info[2])
-    
-    # search hitted ids if it is variants of the same gene
-    variants = ['*']
-    bad_unique = np.zeros((num_prbs,), dtype=bool)
-    for i, hits_for_oneprb in enumerate(hits):
-        for hit_id in hits_for_oneprb:
-            if hit_id not in variants:
-                handle = Entrez.efetch(db="nucleotide", id=hit_id, rettype="gb", retmode="text")
-                search_result = SeqIO.read(handle, "genbank")
-                if gene_name in search_result.description.lower():
                     variants.append(hit_id)
                 else:
                     bad_unique[i] = 1
